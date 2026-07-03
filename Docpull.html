@@ -1,0 +1,706 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DocPull — Extract & Compile Workspace</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@300;400;500&display=swap" rel="stylesheet">
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.0.5/dist/tesseract.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+
+  <style>
+    /* ── Reset & Tokens ── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg:          #060010;
+      --surface:     #120c24;
+      --surface2:    #1d1636;
+      --border:      #251f3b;
+      --border2:     #3d355c;
+      --accent:      #f0a500;
+      --accent-dim:  rgba(240,165,0,.10);
+      --text:        #ededf0;
+      --text-dim:    #e0e0e6;
+      --text-muted:  #625b7e;
+      --success:     #4ade80;
+      --danger:      #f87171;
+      --danger-bg:   rgba(248,113,113,.08);
+      --r-sm:        7px;
+      --r-md:        10px;
+      --r-lg:        16px;
+      --sans:        'Syne', sans-serif;
+      --mono:        'DM Mono', monospace;
+    }
+
+    html, body { min-height: 100vh; background: var(--bg); color: var(--text); font-family: var(--sans); -webkit-font-smoothing: antialiased; }
+    body { display: flex; flex-direction: column; overflow-x: hidden; }
+
+    header { padding: 20px 40px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 14px; background: rgba(6, 0, 16, 0.8); backdrop-filter: blur(8px); z-index: 10; }
+    .logo { font-size: 20px; font-weight: 800; letter-spacing: -0.5px; }
+    .logo span { color: var(--accent); }
+    .tagline { font-size: 13px; color: var(--text-dim); }
+
+    main { flex: 1; padding: 30px; max-width: 1800px; width: 100%; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+
+    .fmt-row { display: flex; gap: 6px; flex-wrap: wrap; }
+    .fmt-badge { font-family: var(--mono); font-size: 11px; padding: 3px 9px; border-radius: 4px; border: 1px solid var(--border); color: var(--text-dim); background: var(--surface); }
+    .fmt-badge.new { border-color: var(--accent); color: var(--accent); }
+
+    .upload-zone { border: 1.5px dashed var(--border2); border-radius: var(--r-lg); padding: 56px 24px; display: flex; flex-direction: column; align-items: center; gap: 12px; cursor: pointer; background: var(--surface); transition: all .2s ease; }
+    .upload-zone:hover, .upload-zone.drag-over { border-color: var(--accent); border-style: solid; background: var(--surface2); }
+    .upload-icon { width: 44px; height: 44px; color: var(--text-dim); transition: all .2s ease; }
+    .upload-zone:hover .upload-icon, .upload-zone.drag-over .upload-icon { color: var(--accent); transform: translateY(-3px); }
+    .upload-title { font-size: 16px; font-weight: 600; }
+    #fileInput { display: none; }
+
+    .processing { display: none; align-items: center; gap: 14px; padding: 20px 18px; background: var(--surface); border-radius: var(--r-md); border: 1px solid var(--border); }
+    .processing.active { display: flex; }
+    .spinner { width: 20px; height: 20px; border: 2px solid var(--border2); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; flex-shrink: 0; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .processing-text { font-family: var(--mono); font-size: 13px; color: var(--text-dim); }
+
+    .error-box { display: none; padding: 14px 16px; background: var(--danger-bg); border: 1px solid var(--danger); border-radius: var(--r-md); font-family: var(--mono); font-size: 13px; color: var(--danger); }
+    .error-box.active { display: block; }
+
+    /* ── 3-Column Split Workspace ── */
+    .results { display: none; flex-direction: column; gap: 16px; animation: fadeUp .3s ease; }
+    .results.active { display: flex; }
+    @keyframes fadeUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+
+    .workspace-layout { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) minmax(0, 1fr); gap: 20px; min-height: 600px; }
+    @media (max-width: 1200px) { .workspace-layout { grid-template-columns: 1fr 1fr; } .work-column:nth-child(3) { grid-column: span 2; } }
+    @media (max-width: 800px) { .workspace-layout { grid-template-columns: 1fr; } .work-column:nth-child(3) { grid-column: span 1; } }
+    
+    .work-column { display: flex; flex-direction: column; gap: 12px; }
+    .column-header { display: flex; justify-content: space-between; align-items: center; }
+    .column-title { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: var(--accent); }
+
+    .viewer-panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md); padding: 20px; height: 700px; overflow-y: auto; display: flex; flex-direction: column; align-items: center; gap: 24px; position: relative; scrollbar-width: thin; scrollbar-color: var(--border2) transparent; }
+    .render-container { position: relative; box-shadow: 0 10px 30px rgba(0,0,0,0.5); border-radius: 4px; overflow: hidden; background: white; }
+    .render-container canvas, .render-container img { display: block; max-width: 100%; height: auto; }
+    
+    .text-overlay-layer { position: absolute; top: 0; left: 0; right: 0; bottom: 0; color: transparent; mix-blend-mode: multiply; pointer-events: auto; }
+    .text-overlay-layer ::selection { background: rgba(240, 165, 0, 0.35); }
+    .text-overlay-layer span { position: absolute; line-height: 1; transform-origin: 0% 0%; cursor: text; white-space: pre; }
+
+    .text-output { background: var(--surface2); border: 1px solid var(--border); border-radius: var(--r-md); padding: 20px; height: 700px; overflow-y: auto; font-family: var(--mono); font-size: 14px; line-height: 1.7; color: var(--text); white-space: pre-wrap; word-break: break-word; user-select: text; scrollbar-width: thin; scrollbar-color: var(--border2) transparent; }
+    
+    .notepad-area { border-color: var(--accent); background: rgba(240, 165, 0, 0.03); outline: none; }
+    .notepad-area:focus { box-shadow: inset 0 0 0 1px var(--accent); }
+    .notepad-area:empty:before { content: attr(placeholder); color: var(--text-muted); font-style: italic; pointer-events: none; display: block; }
+
+    .viewer-panel::-webkit-scrollbar, .text-output::-webkit-scrollbar { width: 6px; }
+    .viewer-panel::-webkit-scrollbar-thumb, .text-output::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+
+    /* ── Meta & Tools ── */
+    .meta-bar { display: flex; align-items: center; gap: 10px; padding: 12px 16px; background: var(--surface); border-radius: var(--r-md); border: 1px solid var(--border); flex-wrap: wrap; }
+    .file-ext { font-family: var(--mono); font-size: 10px; font-weight: 500; padding: 4px 8px; border-radius: 4px; border: 1px solid var(--border2); color: var(--text-dim); min-width: 45px; text-align: center; }
+    .file-name { font-size: 13px; font-weight: 600; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .file-size { font-family: var(--mono); font-size: 12px; color: var(--text-dim); }
+    
+    .btn-micro { padding: 4px 10px; font-size: 10px; border-radius: 4px; border: 1px solid var(--border); background: var(--surface); color: var(--text-dim); font-weight: 700; cursor: pointer; transition: all 0.2s; text-transform: uppercase; }
+    .btn-micro:hover { border-color: var(--accent); color: var(--accent); }
+    .btn-micro.danger:hover { border-color: var(--danger); color: var(--danger); }
+
+    footer { padding: 20px 40px; border-top: 1px solid var(--border); font-size: 12px; color: var(--text-muted); font-family: var(--mono); text-align: center; margin-top: auto; }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="logo">doc<span>pull</span></div>
+    <div class="tagline">Extract. Map. Compile.</div>
+  </header>
+
+  <main>
+    <div class="fmt-row">
+      <span class="fmt-badge">PDF</span>
+      <span class="fmt-badge">DOCX</span>
+      <span class="fmt-badge">DOC</span>
+      <span class="fmt-badge">TXT</span>
+      <span class="fmt-badge new">PNG, JPG, WEBP (OCR)</span>
+    </div>
+
+    <div class="upload-zone" id="uploadZone" style="padding: 20px; flex-direction: row; justify-content: center; min-height: auto;">
+      <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="width: 24px; height: 24px;"><path d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1M8 12l4-4m0 0l4 4m-4-4v8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <div class="upload-title" style="font-size: 14px;">Drop a file, click to browse, or paste a screenshot (Ctrl+V) — Notepad stays safe</div>
+    </div>
+    
+    <input type="file" id="fileInput" accept=".pdf,.doc,.docx,.txt,.png,.jpg,.jpeg,.webp" style="display: none;">
+
+    <div class="processing" id="processing">
+      <div class="spinner"></div>
+      <div class="processing-text" id="processingText">Reading file...</div>
+    </div>
+
+    <div class="error-box" id="errorBox"></div>
+
+    <div class="results active" id="results" style="display: flex;">
+      <div class="meta-bar" id="metaBar" style="display: none;">
+        <span class="file-ext" id="fileExt">—</span>
+        <span class="file-name" id="fileName">—</span>
+        <span class="file-size" id="fileSize">—</span>
+        <button class="btn-micro danger" id="resetFileBtn" title="Clear current file, image, or PDF (Notepad stays safe)">Reset</button>
+      </div>
+
+      <div class="workspace-layout">
+        
+        <div class="work-column">
+          <div class="column-header">
+            <div class="column-title">Interactive Source Map</div>
+          </div>
+          <div class="viewer-panel" id="viewerPanel">
+            <div style="margin:auto; color: var(--text-muted); font-size: 13px; text-align:center;">Upload a document to render visual map</div>
+          </div>
+        </div>
+        
+        <div class="work-column">
+          <div class="column-header">
+            <div class="column-title">Raw Extraction</div>
+            <button class="btn-micro" id="copyExtractBtn">Copy All</button>
+          </div>
+          <div class="text-output" id="textOutput" contenteditable="true" placeholder="Text extracted from the current document will appear here..."></div>
+        </div>
+
+        <div class="work-column">
+          <div class="column-header">
+            <div class="column-title" style="color: var(--success);">Master Notepad</div>
+            <div style="display:flex; gap: 6px;">
+              <button class="btn-micro" id="exportPdfBtn" title="Export as PDF Document">Export PDF</button>
+              <button class="btn-micro" id="exportWordBtn" title="Export as Word Document">Export DOC</button>
+              <button class="btn-micro danger" id="clearNotepadBtn" title="Erase everything">Clear</button>
+            </div>
+          </div>
+          <div class="text-output notepad-area" id="masterNotepad" contenteditable="true" placeholder="Paste and compile text from multiple documents here. This notepad won't erase when you upload a new file."></div>
+        </div>
+
+      </div>
+    </div>
+  </main>
+
+  <footer>docpull · Built by surya locally. Client-side processing only. Data never leaves your browser.</footer>
+
+  <script>
+    // Set up PDF.js worker
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
+
+    // DOM Elements
+    const uploadZone    = document.getElementById('uploadZone');
+    const fileInput     = document.getElementById('fileInput');
+    const processingEl  = document.getElementById('processing');
+    const processingTxt = document.getElementById('processingText');
+    const errorEl       = document.getElementById('errorBox');
+    const metaBar       = document.getElementById('metaBar');
+    
+    const textOutput    = document.getElementById('textOutput');
+    const viewerPanel   = document.getElementById('viewerPanel');
+    const masterNotepad = document.getElementById('masterNotepad');
+    
+    const copyExtractBtn  = document.getElementById('copyExtractBtn');
+    const exportPdfBtn    = document.getElementById('exportPdfBtn');
+    const exportWordBtn   = document.getElementById('exportWordBtn');
+    const clearNotepadBtn = document.getElementById('clearNotepadBtn');
+    const resetFileBtn    = document.getElementById('resetFileBtn');
+
+    let currentText = '';
+
+    // ── GLOBAL PROTECTIONS ──
+    // Prevent accidental browser navigation if a file is dropped outside the upload zone
+    window.addEventListener('dragover', e => e.preventDefault());
+    window.addEventListener('drop', e => e.preventDefault());
+
+    // ── UPLOAD BINDINGS ──
+    uploadZone.addEventListener('click', () => fileInput.click());
+    uploadZone.addEventListener('dragover', e => { e.preventDefault(); uploadZone.classList.add('drag-over'); });
+    uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('drag-over'));
+    uploadZone.addEventListener('drop', e => {
+      e.preventDefault();
+      uploadZone.classList.remove('drag-over');
+      if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
+    });
+
+    fileInput.addEventListener('change', () => {
+      if (fileInput.files[0]) {
+        handleFile(fileInput.files[0]);
+        // Reset the value so you can upload the exact same file twice if needed
+        fileInput.value = ''; 
+      }
+    });
+
+    // ── CLIPBOARD PASTE (Ctrl+V) — Windows screenshots / copied images ──
+    // Fires no matter which element has focus (notepad, raw extract, anywhere on page).
+    // If clipboard contains image data, treat it exactly like a dropped/uploaded file.
+    // If it's plain text, we do nothing and let the browser's normal paste behavior happen.
+    document.addEventListener('paste', (e) => {
+      const cd = e.clipboardData;
+      if (!cd) return;
+
+      let imageFile = null;
+
+      if (cd.items && cd.items.length) {
+        for (const item of cd.items) {
+          if (item.kind === 'file' && item.type.indexOf('image') !== -1) {
+            imageFile = item.getAsFile();
+            break;
+          }
+        }
+      }
+      // Fallback for browsers that expose files directly instead of items
+      if (!imageFile && cd.files && cd.files.length) {
+        for (const f of cd.files) {
+          if (f.type.indexOf('image') !== -1) { imageFile = f; break; }
+        }
+      }
+
+      if (imageFile) {
+        e.preventDefault(); // stop it from being inserted as a raw blob inside contenteditable areas
+        const rawExt = (imageFile.type.split('/')[1] || 'png').toLowerCase();
+        const ext = rawExt === 'jpeg' ? 'jpg' : rawExt;
+        const named = new File([imageFile], `pasted-screenshot-${Date.now()}.${ext}`, { type: imageFile.type });
+        flashUploadZone();
+        handleFile(named);
+      }
+      // No image found -> do nothing, normal text paste proceeds untouched
+    });
+
+    function flashUploadZone() {
+      uploadZone.style.borderColor = 'var(--success)';
+      uploadZone.style.borderStyle = 'solid';
+      setTimeout(() => {
+        uploadZone.style.borderColor = '';
+        uploadZone.style.borderStyle = '';
+      }, 700);
+    }
+
+    // File Pipeline
+    async function handleFile(file) {
+      const ext = file.name.split('.').pop().toLowerCase();
+      showProcessing(true);
+      hideError();
+      
+      // Clear ONLY the current file data (Columns 1 and 2), DO NOT clear Notepad (Column 3)
+      viewerPanel.innerHTML = ''; 
+      textOutput.textContent = '';
+      metaBar.style.display = 'flex';
+
+      try {
+        if (ext === 'pdf') {
+          await extractPDF(file);
+        } else if (ext === 'docx' || ext === 'doc') {
+          await extractDOCX(file);
+        } else if (['png', 'jpg', 'jpeg', 'webp'].includes(ext)) {
+          await extractImageOCR(file);
+        } else if (ext === 'txt') {
+          await extractTXT(file);
+        } else {
+          showError(`.${ext} formats aren't supported yet.`);
+          showProcessing(false);
+          return;
+        }
+
+        document.getElementById('fileExt').textContent  = ext.toUpperCase();
+        document.getElementById('fileName').textContent = file.name.length > 40 ? file.name.slice(0, 37) + '...' : file.name;
+        document.getElementById('fileSize').textContent = formatBytes(file.size);
+
+      } catch (err) {
+        showError("Unable to process file. It might be corrupted or protected.");
+        console.error(err);
+        showProcessing(false);
+      }
+    }
+
+    // ── OCR PRE-PROCESSING ──
+    // Phone-photographed pages (vs. flatbed scans) almost always have uneven lighting —
+    // a shadow gradient from the page curl, a brighter/dimmer corner, etc. Tesseract's
+    // layout analysis is very sensitive to this: it causes it to silently drop small
+    // text (like diagram callout labels) and fragment paragraphs at the exact spots
+    // where the lighting shifts. A locally-adaptive threshold (computing a local
+    // black/white cutoff per neighborhood instead of one global cutoff) flattens that
+    // out before OCR ever runs. Verified directly against a real scanned textbook page:
+    // this recovered labels that were being dropped entirely and fixed paragraphs that
+    // were getting split mid-sentence.
+    function prepareOcrCanvas(img) {
+      const MAX_DIM = 2600; // cap long side to bound memory/CPU on big phone-camera photos
+      let procW = img.naturalWidth;
+      let procH = img.naturalHeight;
+      const longSide = Math.max(procW, procH);
+      if (longSide > MAX_DIM) {
+        const scale = MAX_DIM / longSide;
+        procW = Math.round(procW * scale);
+        procH = Math.round(procH * scale);
+      }
+
+      const canvas = document.createElement('canvas');
+      canvas.width = procW;
+      canvas.height = procH;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0, procW, procH);
+
+      const imageData = ctx.getImageData(0, 0, procW, procH);
+      const data = imageData.data;
+      const n = procW * procH;
+
+      // Grayscale
+      const gray = new Float64Array(n);
+      for (let i = 0, p = 0; i < n; i++, p += 4) {
+        gray[i] = 0.299 * data[p] + 0.587 * data[p + 1] + 0.114 * data[p + 2];
+      }
+
+      // Local window size, scaled to image size, clamped to a sane range, forced odd
+      let blockSize = Math.round(Math.min(procW, procH) / 25);
+      blockSize = Math.max(25, Math.min(61, blockSize));
+      if (blockSize % 2 === 0) blockSize += 1;
+      const r = (blockSize - 1) / 2;
+      const C = 15; // how much darker than the local average a pixel must be to count as "ink"
+
+      // 1D Gaussian kernel (center-weighted local average). A flat/uniform average misses
+      // faint diagram labels near graphic lines — a center-weighted one catches them; this
+      // was verified directly against a real scanned page before being wired in here.
+      const sigma = 0.3 * ((blockSize - 1) * 0.5 - 1) + 0.8;
+      const kernel = new Float64Array(blockSize);
+      let kSum = 0;
+      for (let i = 0; i < blockSize; i++) {
+        const x = i - r;
+        const w = Math.exp(-(x * x) / (2 * sigma * sigma));
+        kernel[i] = w;
+        kSum += w;
+      }
+      for (let i = 0; i < blockSize; i++) kernel[i] /= kSum;
+
+      // Separable convolution: horizontal pass, then vertical pass, edge-clamped borders.
+      // (Two 1D passes is mathematically equivalent to one 2D Gaussian blur, but much cheaper.)
+      const hBlur = new Float64Array(n);
+      for (let y = 0; y < procH; y++) {
+        const rowBase = y * procW;
+        for (let x = 0; x < procW; x++) {
+          let sum = 0;
+          for (let k = 0; k < blockSize; k++) {
+            let sx = x + (k - r);
+            if (sx < 0) sx = 0; else if (sx >= procW) sx = procW - 1;
+            sum += kernel[k] * gray[rowBase + sx];
+          }
+          hBlur[rowBase + x] = sum;
+        }
+      }
+
+      const blurred = new Float64Array(n);
+      for (let x = 0; x < procW; x++) {
+        for (let y = 0; y < procH; y++) {
+          let sum = 0;
+          for (let k = 0; k < blockSize; k++) {
+            let sy = y + (k - r);
+            if (sy < 0) sy = 0; else if (sy >= procH) sy = procH - 1;
+            sum += kernel[k] * hBlur[sy * procW + x];
+          }
+          blurred[y * procW + x] = sum;
+        }
+      }
+
+      for (let i = 0; i < n; i++) {
+        const val = gray[i] > (blurred[i] - C) ? 255 : 0;
+        const p = i * 4;
+        data[p] = data[p + 1] = data[p + 2] = val;
+      }
+
+      ctx.putImageData(imageData, 0, 0);
+      return canvas;
+    }
+
+    // 1. Tesseract.js Image OCR (WITH SMART PARAGRAPHS)
+    async function extractImageOCR(file) {
+      setProcessingText('Loading image...');
+      const imageUrl = URL.createObjectURL(file);
+
+      // Load fully before doing anything else — this also fixes a previous bug where
+      // img.onload was attached too late (after Tesseract finished) and so the
+      // word-highlight overlay almost never had a chance to actually position itself.
+      const img = new Image();
+      await new Promise((resolve, reject) => {
+        img.onload = resolve;
+        img.onerror = () => reject(new Error('Could not load image'));
+        img.src = imageUrl;
+      });
+
+      const container = document.createElement('div');
+      container.className = 'render-container';
+      container.appendChild(img);
+
+      const overlay = document.createElement('div');
+      overlay.className = 'text-overlay-layer';
+      container.appendChild(overlay);
+      viewerPanel.appendChild(container);
+
+      setProcessingText('Enhancing scan for OCR...');
+      const ocrCanvas = prepareOcrCanvas(img);
+
+      setProcessingText('Initializing OCR Engine...');
+      const result = await Tesseract.recognize(ocrCanvas, 'eng', {
+        logger: m => {
+          if(m.status === 'recognizing text') {
+            setProcessingText(`Scanning: ${Math.round(m.progress * 100)}%`);
+          }
+        }
+      });
+
+      // SMART PARAGRAPH FORMATTING
+      let fullText = '';
+      if (result.data.paragraphs && result.data.paragraphs.length > 0) {
+        fullText = result.data.paragraphs.map(p => {
+          const cleanParagraph = p.text.replace(/\n/g, ' ').trim();
+          return cleanParagraph;
+        }).join('\n\n'); 
+      } else {
+        fullText = result.data.text;
+      }
+
+      if (result.data.words && result.data.words.length > 0) {
+        const rect = img.getBoundingClientRect();
+        const scaleX = rect.width / result.data.imageWidth;
+        const scaleY = rect.height / result.data.imageHeight;
+
+        result.data.words.forEach(word => {
+          const span = document.createElement('span');
+          span.textContent = word.text + ' ';
+          span.style.left = (word.bbox.x0 * scaleX) + 'px';
+          span.style.top = (word.bbox.y0 * scaleY) + 'px';
+          span.style.width = ((word.bbox.x1 - word.bbox.x0) * scaleX) + 'px';
+          span.style.height = ((word.bbox.y1 - word.bbox.y0) * scaleY) + 'px';
+          span.style.fontSize = ((word.bbox.y1 - word.bbox.y0) * scaleY * 0.9) + 'px';
+          overlay.appendChild(span);
+        });
+      }
+      displayResults(fullText.trim());
+    }
+
+    // 2. Visual PDF Mapping
+    async function extractPDF(file) {
+      setProcessingText('Reading Document Stream...');
+      const buffer = await file.arrayBuffer();
+      const pdf    = await pdfjsLib.getDocument({ data: buffer }).promise;
+
+      let fullText = '';
+      
+      for (let i = 1; i <= pdf.numPages; i++) {
+        setProcessingText(`Parsing Visual Matrix Page ${i}/${pdf.numPages}...`);
+        const page = await pdf.getPage(i);
+        const scale = 1.5;
+        const viewport = page.getViewport({ scale: scale });
+
+        const container = document.createElement('div');
+        container.className = 'render-container';
+        container.style.width = viewport.width + 'px';
+        container.style.height = viewport.height + 'px';
+        container.style.marginBottom = '20px';
+
+        const canvas = document.createElement('canvas');
+        const context = canvas.getContext('2d');
+        canvas.height = viewport.height;
+        canvas.width = viewport.width;
+        container.appendChild(canvas);
+
+        const overlay = document.createElement('div');
+        overlay.className = 'text-overlay-layer';
+        container.appendChild(overlay);
+        viewerPanel.appendChild(container);
+
+        await page.render({ canvasContext: context, viewport: viewport }).promise;
+
+        const textContent = await page.getTextContent();
+        fullText += textContent.items.map(item => item.str).join(' ') + '\n\n';
+
+        textContent.items.forEach(item => {
+          const tx = pdfjsLib.Util.transform(viewport.transform, item.transform);
+          const span = document.createElement('span');
+          span.textContent = item.str;
+          span.style.fontFamily = item.fontName;
+          span.style.left = tx[4] + 'px';
+          span.style.top = (tx[5] - item.height * scale) + 'px';
+          span.style.fontSize = (item.height * scale) + 'px';
+          if (item.width) span.style.width = (item.width * scale) + 'px';
+          overlay.appendChild(span);
+        });
+      }
+      displayResults(fullText.trim());
+    }
+
+    // 3. Word DOCX Handling
+    async function extractDOCX(file) {
+      setProcessingText('Decompressing Word Document...');
+      const buffer = await file.arrayBuffer();
+      const result = await mammoth.extractRawValue({ arrayBuffer: buffer });
+      
+      const fallbackMsg = document.createElement('div');
+      fallbackMsg.style.padding = '40px';
+      fallbackMsg.style.textAlign = 'center';
+      fallbackMsg.style.color = 'var(--text-muted)';
+      fallbackMsg.innerHTML = `<p>Visual vector layering is optimized for PDFs and Images.</p><br><small>Your text has been extracted to the right.</small>`;
+      viewerPanel.appendChild(fallbackMsg);
+
+      displayResults(result.value.trim());
+    }
+
+    // 4. Plain Text Handling
+    async function extractTXT(file) {
+      setProcessingText('Reading text file...');
+      const text = await file.text();
+      
+      const fallbackMsg = document.createElement('div');
+      fallbackMsg.style.padding = '40px';
+      fallbackMsg.style.textAlign = 'center';
+      fallbackMsg.style.color = 'var(--text-muted)';
+      fallbackMsg.innerHTML = `<p>Plain text loaded.</p><br><small>Extracted text is available to the right.</small>`;
+      viewerPanel.appendChild(fallbackMsg);
+
+      displayResults(text.trim());
+    }
+
+    // Displays the text in Column 2 (Raw Extract)
+    function displayResults(text) {
+      currentText = text;
+      textOutput.textContent = text || '(No extractable text found in this document)';
+      showProcessing(false);
+    }
+
+    // ── NOTEPAD ACTIONS & EXPORTS ──
+
+    copyExtractBtn.addEventListener('click', async () => {
+      if (!currentText) return;
+      try {
+        await navigator.clipboard.writeText(currentText);
+        copyExtractBtn.textContent = 'Copied!';
+        setTimeout(() => copyExtractBtn.textContent = 'Copy All', 2000);
+      } catch (e) {
+        console.error('Clipboard failed', e);
+      }
+    });
+
+    clearNotepadBtn.addEventListener('click', () => {
+      if (confirm("Are you sure you want to clear your Master Notepad?")) {
+        masterNotepad.innerHTML = '';
+      }
+    });
+
+    resetFileBtn.addEventListener('click', () => {
+      const hasFile = metaBar.style.display !== 'none';
+      if (hasFile && !confirm("Clear the current file, image, or PDF? Your Master Notepad won't be touched.")) return;
+      resetFileView();
+    });
+
+    function resetFileView() {
+      viewerPanel.innerHTML = '<div style="margin:auto; color: var(--text-muted); font-size: 13px; text-align:center;">Upload a document to render visual map</div>';
+      textOutput.textContent = '';
+      currentText = '';
+      metaBar.style.display = 'none';
+      hideError();
+      showProcessing(false);
+      fileInput.value = '';
+    }
+
+    exportPdfBtn.addEventListener('click', () => {
+      const rawText = masterNotepad.innerText.trim();
+      if (!rawText) return alert("Your Master Notepad is empty!");
+
+      exportPdfBtn.textContent = 'Generating...';
+      exportPdfBtn.disabled = true;
+
+      try {
+        // Use jsPDF's text API directly — writes text straight into the PDF file,
+        // no html2canvas screenshot involved, no DOM element needed. This is why
+        // the previous approach always gave a blank file: it was screenshotting a
+        // div that wasn't properly visible in the browser.
+        const { jsPDF } = window.jspdf;
+        const doc = new jsPDF({ unit: 'mm', format: 'a4', orientation: 'portrait' });
+
+        const marginX  = 18;
+        const marginY  = 20;
+        const pageW    = doc.internal.pageSize.getWidth();
+        const pageH    = doc.internal.pageSize.getHeight();
+        const usableW  = pageW - marginX * 2;
+        const lineH    = 6.5;
+
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(11);
+        doc.setTextColor(30, 30, 30);
+
+        // Split text into page-width-fitted lines, preserving blank lines as paragraph gaps
+        const allLines = [];
+        rawText.split('\n').forEach(para => {
+          if (!para.trim()) {
+            allLines.push(null); // null = blank/paragraph gap line
+          } else {
+            doc.splitTextToSize(para, usableW).forEach(l => allLines.push(l));
+          }
+        });
+
+        let y = marginY;
+        allLines.forEach(line => {
+          if (y + lineH > pageH - marginY) {
+            doc.addPage();
+            y = marginY;
+          }
+          if (line !== null) doc.text(line, marginX, y);
+          y += lineH;
+        });
+
+        doc.save('DocPull_Compiled_Notes.pdf');
+      } catch (err) {
+        alert('PDF export failed: ' + err.message);
+      } finally {
+        exportPdfBtn.textContent = 'Export PDF';
+        exportPdfBtn.disabled = false;
+      }
+    });
+
+    exportWordBtn.addEventListener('click', () => {
+      const rawText = masterNotepad.innerText.trim();
+      if (!rawText) return alert("Your Master Notepad is empty!");
+
+      // RTF (Rich Text Format) is a real, universally-supported document format.
+      // The previous HTML-disguised-as-.doc approach is rejected as "corrupt" on
+      // Android and by Google Docs Mobile because it's not a valid Word file at all.
+      // RTF opens correctly in Word, Google Docs, WPS, and every mobile viewer.
+      const escRtf = s => s
+        .replace(/\\/g, '\\\\')
+        .replace(/\{/g,  '\\{')
+        .replace(/\}/g,  '\\}')
+        .replace(/[^\x00-\x7F]/g, c => `\\u${c.charCodeAt(0)}?`);
+
+      const rtfBody = rawText
+        .split('\n')
+        .map(line => line.trim() ? escRtf(line) : '')
+        .join('\\par\n');
+
+      const rtf = [
+        '{\\rtf1\\ansi\\ansicpg1252\\deff0',
+        '{\\fonttbl{\\f0\\froman\\fcharset0 Arial;}}',
+        '{\\colortbl;\\red30\\green30\\blue30;}',
+        '\\f0\\fs22\\sl276\\slmult1\\cf1\\sa120',
+        rtfBody,
+        '}'
+      ].join('\n');
+
+      const blob = new Blob([rtf], { type: 'application/rtf' });
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement('a');
+      a.href     = url;
+      a.download = 'DocPull_Compiled_Notes.rtf';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    });
+
+    // UI Helpers
+    function showProcessing(show) { processingEl.classList.toggle('active', show); }
+    function setProcessingText(text) { processingTxt.textContent = text; }
+    function showError(msg) { errorEl.textContent = msg; errorEl.classList.add('active'); }
+    function hideError() { errorEl.classList.remove('active'); }
+    function formatBytes(b) { if (b < 1024) return b + ' B'; if (b < 1048576) return (b / 1024).toFixed(1) + ' KB'; return (b / 1048576).toFixed(1) + ' MB'; }
+  </script>
+</body>
+</html>
